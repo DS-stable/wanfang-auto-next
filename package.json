@@ -1,0 +1,15 @@
+{
+  "name": "wanfang-auto-next",
+  "version": "1.2.0",
+  "private": true,
+  "description": "万方课程自动连播浏览器扩展",
+  "scripts": {
+    "test": "node --test tests/*.test.cjs"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "devDependencies": {
+    "jsdom": "29.1.1"
+  }
+}
