@@ -1,20 +1,31 @@
 {
   "manifest_version": 3,
   "name": "万方课程自动连播",
-  "version": "1.2.0",
-  "description": "万方课程视频结束后自动连播，随堂测验提交完成后通过左侧目录继续下一视频。",
-  "permissions": ["storage"],
+  "version": "1.3.0",
+  "description": "万方课程视频自动连播，支持手动下一视频、暂停5秒后续播和测验提交后继续。",
+  "permissions": [
+    "storage"
+  ],
   "content_scripts": [
     {
-      "matches": ["https://cx.wanfangdata.com.cn/e-training/*"],
-      "js": ["player-bridge.js"],
+      "matches": [
+        "https://cx.wanfangdata.com.cn/e-training/*"
+      ],
+      "js": [
+        "player-bridge.js"
+      ],
       "world": "MAIN",
       "run_at": "document_idle",
       "all_frames": false
     },
     {
-      "matches": ["https://cx.wanfangdata.com.cn/e-training/*"],
-      "js": ["core.js", "content.js"],
+      "matches": [
+        "https://cx.wanfangdata.com.cn/e-training/*"
+      ],
+      "js": [
+        "core.js",
+        "content.js"
+      ],
       "run_at": "document_idle",
       "all_frames": false
     }

@@ -281,7 +281,7 @@ function installContent(h, { settings = {}, deferGet = false, storageThrows = fa
       local: {
         get(keys, callback) {
           if (storageThrows) throw new Error('extension context invalidated');
-          assert.deepEqual([...keys], ['wanfangEnabled', 'wanfangDelay']);
+          assert.deepEqual([...keys], ['wanfangEnabled', 'wanfangDelay', 'wanfangResumeDelay']);
           if (deferGet) getter = callback; else callback(settings);
         },
         set(values, callback) { writes.push(JSON.parse(JSON.stringify(values))); callback?.(); },
@@ -319,9 +319,9 @@ test('content integration restores and persists chrome.storage preferences and r
   ui.nativeEnd(); await ui.advance(10000); assert.equal(h.clicks, 0);
   ui.$('toggle').click();
   assert.equal(ui.$('toggle').getAttribute('aria-pressed'), 'true');
-  assert.deepEqual(ui.writes.at(-1), { wanfangEnabled: true, wanfangDelay: 10 });
+  assert.deepEqual(ui.writes.at(-1), { wanfangEnabled: true, wanfangDelay: 10, wanfangResumeDelay: 0 });
   ui.$('delay').value = '3'; ui.$('delay').dispatchEvent(new h.window.Event('change'));
-  assert.deepEqual(ui.writes.at(-1), { wanfangEnabled: true, wanfangDelay: 3 });
+  assert.deepEqual(ui.writes.at(-1), { wanfangEnabled: true, wanfangDelay: 3, wanfangResumeDelay: 0 });
   ui.changed({ wanfangEnabled: { newValue: false }, wanfangDelay: { newValue: 5 } });
   assert.equal(ui.$('toggle').getAttribute('aria-pressed'), 'false');
   assert.equal(ui.$('delay').value, '5');
@@ -362,4 +362,42 @@ test('content integration remains usable when Chrome preference access throws', 
   const ui = installContent(h, { storageThrows: true });
   assert.equal(ui.$('toggle').getAttribute('aria-pressed'), 'true');
   ui.nativeEnd(); await ui.advance(5000); assert.equal(h.clicks, 1);
+});
+
+test('timed resume button defaults to infinity and persists the selected 5-second mode', async t => {
+  const h = makeHarness(); t.after(() => h.window.close());
+  const ui = installContent(h);
+  assert.equal(ui.$('resume-controls').hidden, false);
+  assert.equal(ui.$('resume-toggle').textContent, '定时续播：∞');
+  Object.assign(h.state(), { paused: true, currentTime: 10 });
+  h.video().dispatchEvent(new h.window.Event('pause'));
+  await ui.advance(10000);
+  assert.equal(h.state().playCalls, 0, 'infinity preserves the original paused state');
+  ui.$('resume-toggle').click();
+  assert.equal(ui.$('resume-toggle').getAttribute('aria-pressed'), 'true');
+  assert.equal(ui.writes.at(-1).wanfangResumeDelay, 5);
+  assert.equal(ui.$('resume-cancel').hidden, false);
+  assert.match(ui.$('resume-status').textContent, /5 秒后继续播放/);
+  await ui.advance(4999); assert.equal(h.state().playCalls, 0);
+  await ui.advance(1); assert.equal(h.state().playCalls, 1);
+  assert.equal(ui.$('resume-cancel').hidden, true);
+  ui.$('resume-toggle').click();
+  assert.equal(ui.writes.at(-1).wanfangResumeDelay, 0);
+});
+
+test('timed resume UI cancellation and storage changes stop pending play', async t => {
+  const h = makeHarness(); t.after(() => h.window.close());
+  Object.assign(h.state(), { paused: true, currentTime: 10 });
+  const ui = installContent(h, { settings: { wanfangResumeDelay: 5 } });
+  assert.equal(ui.$('resume-cancel').hidden, false);
+  ui.$('resume-cancel').click();
+  await ui.advance(6000); assert.equal(h.state().playCalls, 0);
+  assert.match(ui.$('resume-status').textContent, /已取消本次续播/);
+  ui.changed({ wanfangResumeDelay: { newValue: 0 } });
+  assert.equal(ui.$('resume-toggle').textContent, '定时续播：∞');
+  ui.changed({ wanfangResumeDelay: { newValue: 5 } });
+  assert.equal(ui.$('resume-cancel').hidden, false);
+  ui.changed({ wanfangResumeDelay: { newValue: 0 } });
+  await ui.advance(6000); assert.equal(h.state().playCalls, 0);
+  assert.equal(ui.$('resume-cancel').hidden, true);
 });

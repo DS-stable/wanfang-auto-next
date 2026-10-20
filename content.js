@@ -30,8 +30,11 @@
       .controls { display:flex; align-items:center; justify-content:space-between; gap:8px; }
       label { font-size:12px; color:#63738a; }
       select { border:1px solid #d6dfeb; border-radius:5px; padding:3px; background:#fff; color:#334e73; }
-      #toggle[aria-pressed="true"], #play { background:#2864d7; color:#fff; border-color:#2864d7; }
-      #toggle[aria-pressed="true"]:hover, #play:hover { background:#1c51b6; }
+      #toggle[aria-pressed="true"], #resume-toggle[aria-pressed="true"], #play { background:#2864d7; color:#fff; border-color:#2864d7; }
+      #toggle[aria-pressed="true"]:hover, #resume-toggle[aria-pressed="true"]:hover, #play:hover { background:#1c51b6; }
+      #resume-controls { margin-top:12px; padding-top:12px; border-top:1px solid #e7edf5; }
+      #resume-controls .controls { justify-content:flex-start; flex-wrap:wrap; }
+      #resume-status { margin:7px 0 0; color:#63738a; font-size:12px; }
       #actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
       [hidden] { display:none !important; }
       #compact { display:flex; align-items:center; gap:7px; padding:9px 13px; background:#fff;
@@ -40,7 +43,7 @@
       @media(prefers-reduced-motion:no-preference) { button { transition:background .12s; } }
     </style>
     <section class="panel" aria-label="万方课程自动连播">
-      <header><span class="dot" aria-hidden="true"></span><h2>万方 · 自动连播<span class="version">1.2.0</span></h2>
+      <header><span class="dot" aria-hidden="true"></span><h2>万方 · 自动连播<span class="version">1.3.0</span></h2>
         <button id="collapse" type="button" aria-label="收起自动连播面板">收起</button></header>
       <div id="lesson"></div>
       <p id="status" role="status" aria-live="polite"></p>
@@ -54,6 +57,14 @@
         <button id="cancel" type="button" hidden>取消本次切换</button>
         <button id="play" type="button" hidden>播放当前节</button>
         <button id="continue" type="button" hidden>继续下一视频</button>
+      </div>
+      <div id="resume-controls" hidden>
+        <div class="controls">
+          <button id="resume-toggle" type="button" aria-pressed="false"
+            title="点击切换：暂停 5 秒后继续播放 / ∞ 保持原状">定时续播：∞</button>
+          <button id="resume-cancel" type="button" hidden>取消本次续播</button>
+        </div>
+        <p id="resume-status" role="status" aria-live="polite"></p>
       </div>
     </section>
     <button id="compact" type="button" aria-label="展开自动连播面板" hidden>
@@ -83,7 +94,12 @@
     $("continue").textContent = view.continueLabel || "继续下一视频";
     $("continue").title = view.continueTitle ? `播放：${view.continueTitle}` : "";
     $("actions").hidden = !view.countdown && !view.retry && !view.canContinue;
-    $("compact-text").textContent = view.countdown ? view.message :
+    $("resume-controls").hidden = !view.canResume;
+    $("resume-toggle").setAttribute("aria-pressed", String(view.resumeDelay === 5));
+    $("resume-toggle").textContent = view.resumeDelay === 5 ? "定时续播：5 秒" : "定时续播：∞";
+    $("resume-cancel").hidden = !view.resumeCountdown;
+    $("resume-status").textContent = view.resumeMessage;
+    $("compact-text").textContent = view.resumeCountdown ? view.resumeMessage : view.countdown ? view.message :
       view.retry ? "点击展开并播放" : view.canContinue ? "自动连播 · 点击展开" :
       view.enabled ? "自动连播已开启" : "自动连播已关闭";
   }
@@ -102,7 +118,7 @@
       video.addEventListener("playing", () => controller.onPlaying(video));
       video.addEventListener("seeking", () => controller.onSeeking(video));
       video.addEventListener("loadedmetadata", queueRefresh);
-      video.addEventListener("pause", queueRefresh);
+      video.addEventListener("pause", () => controller.onPaused(video));
     }
     controller.tick();
   }
@@ -118,7 +134,8 @@
 
   function save() {
     try {
-      chrome.storage.local.set({ wanfangEnabled: controller.enabled, wanfangDelay: controller.delay }, () => {
+      chrome.storage.local.set({ wanfangEnabled: controller.enabled, wanfangDelay: controller.delay,
+        wanfangResumeDelay: controller.resumeDelay }, () => {
         // A reloaded unpacked extension can invalidate the old page context.
         void chrome.runtime.lastError;
       });
@@ -136,6 +153,11 @@
   $("cancel").addEventListener("click", () => controller.cancel());
   $("play").addEventListener("click", () => controller.playCurrent());
   $("continue").addEventListener("click", () => controller.continueToNextVideo());
+  $("resume-toggle").addEventListener("click", () => {
+    controller.configure({ resumeDelay: controller.resumeDelay === 5 ? 0 : 5 });
+    save();
+  });
+  $("resume-cancel").addEventListener("click", () => controller.cancelResume());
   $("collapse").addEventListener("click", () => { minimized = true; render(lastView); });
   $("compact").addEventListener("click", () => { minimized = false; render(lastView); });
 
@@ -153,15 +175,17 @@
   setInterval(refresh, 500);
 
   try {
-    chrome.storage.local.get(["wanfangEnabled", "wanfangDelay"], settings => {
+    chrome.storage.local.get(["wanfangEnabled", "wanfangDelay", "wanfangResumeDelay"], settings => {
       void chrome.runtime.lastError;
       initialized = true;
-      controller.configure({ enabled: settings?.wanfangEnabled, delay: settings?.wanfangDelay });
+      controller.configure({ enabled: settings?.wanfangEnabled, delay: settings?.wanfangDelay,
+        resumeDelay: settings?.wanfangResumeDelay });
       refresh();
     });
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== "local") return;
-      controller.configure({ enabled: changes.wanfangEnabled?.newValue, delay: changes.wanfangDelay?.newValue });
+      controller.configure({ enabled: changes.wanfangEnabled?.newValue, delay: changes.wanfangDelay?.newValue,
+        resumeDelay: changes.wanfangResumeDelay ? changes.wanfangResumeDelay.newValue ?? 0 : undefined });
     });
   } catch (_) {
     initialized = true;
