@@ -261,6 +261,17 @@ test('NotAllowedError is reported once and does not generate an endless five-sec
   assert.ok(h.controller.resumePending, 'a later real playing then pause episode may try again');
 });
 
+test('a rejected timed resume keeps its playback help visible with automatic next disabled', async () => {
+  const h = harness({ result: () => Promise.reject(Object.assign(new Error('blocked'), { name: 'NotAllowedError' })) });
+  h.controller.configure({ enabled: false, resumeDelay: 5 });
+  h.pause();
+  h.advance(5000); await flush();
+  h.advance(500);
+  assert.equal(h.frame.retry, true);
+  assert.match(h.frame.message, /浏览器阻止了自动播放/);
+  assert.equal(h.video.playCalls, 1);
+});
+
 test('resume startup supervision retries the same media at most three times and then stops', async () => {
   const h = harness();
   h.enable();

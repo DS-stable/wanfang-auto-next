@@ -400,7 +400,8 @@
       }
       // A direct click on "continue" works even when automatic advancement is off.
       if (!this.enabled && this.pending?.kind !== "manual") {
-        this.show(snapshot, "自动连播已关闭。");
+        this.show(snapshot, this.retry && this.notice && sameLesson(snapshot, this.notice) ?
+          this.notice.message : "自动连播已关闭。");
         return;
       }
       const pending = this.pending;
