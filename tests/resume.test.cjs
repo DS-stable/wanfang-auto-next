@@ -67,8 +67,6 @@ test('a pause resumes this same video after a complete five seconds', async () =
   h.advance(1);
   await flush();
   assert.equal(h.video.playCalls, 1);
-  assert.equal(h.controller.resumePending, null);
-  assert.equal(h.controller.pending?.resume, true);
   assert.equal(h.nextClicks, 0, 'a resume must never click another lesson');
 });
 
@@ -128,7 +126,6 @@ test('resume remains independent of the automatic next-video switch', () => {
   h.advance(5000);
   assert.equal(h.controller.enabled, false);
   assert.equal(h.video.playCalls, 1);
-  assert.equal(h.controller.pending?.resume, true);
   assert.equal(h.nextClicks, 0);
 });
 
@@ -146,7 +143,6 @@ test('selecting infinity cancels both the countdown and resume-owned startup ret
   h.advance(5000);
   await flush();
   assert.equal(h.video.playCalls, 1);
-  assert.equal(h.controller.pending?.resume, true);
   h.controller.configure({ resumeDelay: 0 });
   h.advance(60000);
   await flush();
@@ -208,7 +204,7 @@ for (const change of ['route', 'key', 'source', 'video']) {
 }
 
 for (const state of ['modal', 'error']) {
-  test(`${state} cancels a pause countdown and clearing it does not silently rearm`, () => {
+  test(`${state} does not suppress or postpone the five-second pause recovery`, () => {
     const h = harness();
     h.enable();
     h.pause();
@@ -216,32 +212,35 @@ for (const state of ['modal', 'error']) {
     if (state === 'modal') h.snapshot = { ...h.snapshot, modal: true };
     else h.video.error = { code: 2 };
     h.advance(1000);
-    assert.equal(h.controller.resumePending, null);
+    assert.equal(h.video.playCalls, 0);
+    assert.equal(h.controller.resumePending?.deadline, 5000);
+    h.advance(2000);
+    assert.equal(h.video.playCalls, 1);
     if (state === 'modal') h.snapshot = { ...h.snapshot, modal: false };
     else h.video.error = null;
-    h.advance(60000);
-    assert.equal(h.video.playCalls, 0);
+    h.advance(5000);
+    assert.equal(h.video.playCalls, 2, 'a still-paused player is retried after another five seconds');
     assert.equal(h.nextClicks, 0);
   });
 }
 
-test('seeking clears the old timer and a paused player gets five seconds after the seek settles', () => {
+test('seeking preserves the original pause deadline and does not suppress the play attempt', () => {
   const h = harness();
   h.enable();
   h.pause();
   h.advance(2000);
   h.video.seeking = true;
   h.controller.onSeeking(h.video);
-  h.advance(3000);
-  assert.equal(h.controller.resumePending, null);
-  assert.equal(h.video.playCalls, 0);
-  h.video.seeking = false;
-  h.advance(1);
-  assert.equal(h.controller.resumePending?.deadline, h.time + 5000);
-  h.advance(4999);
+  h.advance(2999);
+  assert.equal(h.controller.resumePending?.deadline, 5000);
   assert.equal(h.video.playCalls, 0);
   h.advance(1);
   assert.equal(h.video.playCalls, 1);
+  h.video.seeking = false;
+  h.advance(4999);
+  assert.equal(h.video.playCalls, 1);
+  h.advance(1);
+  assert.equal(h.video.playCalls, 2);
 });
 
 test('a pause that begins in the background resumes the same video after five seconds', () => {
@@ -254,7 +253,6 @@ test('a pause that begins in the background resumes the same video after five se
   assert.equal(h.video.playCalls, 0);
   h.advance(1);
   assert.equal(h.video.playCalls, 1);
-  assert.equal(h.controller.pending?.resume, true);
   h.snapshot = { ...h.snapshot, hidden: false };
   h.playing();
   h.advance(1000);
@@ -276,25 +274,25 @@ test('switching applications during a pause preserves its original five-second d
   assert.equal(h.nextClicks, 0);
 });
 
-test('NotAllowedError is reported once and does not generate an endless five-second play loop', async () => {
+test('NotAllowedError keeps playback help visible and retries each five seconds', async () => {
   const h = harness({ result: () => Promise.reject(Object.assign(new Error('blocked'), { name: 'NotAllowedError' })) });
   h.enable();
   h.pause();
   h.advance(5000);
   await flush();
   assert.equal(h.video.playCalls, 1);
-  assert.equal(h.controller.pending, null);
   assert.equal(h.frame.retry, true);
+  assert.match(h.frame.message, /浏览器阻止了自动播放/);
   h.controller.onPaused(h.video);
-  for (let i = 0; i < 5; i++) {
-    h.advance(60000);
+  for (let expected = 2; expected <= 6; expected++) {
+    h.advance(4999);
     await flush();
+    assert.equal(h.video.playCalls, expected - 1);
+    h.advance(1);
+    await flush();
+    assert.equal(h.video.playCalls, expected);
   }
-  assert.equal(h.video.playCalls, 1);
-  assert.equal(h.controller.resumePending, null);
-  h.playing();
-  h.pause();
-  assert.ok(h.controller.resumePending, 'a later real playing then pause episode may try again');
+  assert.equal(h.nextClicks, 0);
 });
 
 test('a rejected timed resume keeps its playback help visible with automatic next disabled', async () => {
@@ -308,52 +306,40 @@ test('a rejected timed resume keeps its playback help visible with automatic nex
   assert.equal(h.video.playCalls, 1);
 });
 
-test('resume startup supervision retries the same media at most three times and then stops', async () => {
+test('a still-paused player keeps retrying every five seconds beyond the old startup timeout', async () => {
   const h = harness();
   h.enable();
   h.pause();
-  h.advance(5000);
-  await flush();
-  assert.equal(h.video.playCalls, 1);
-  h.advance(3000); await flush();
-  assert.equal(h.video.playCalls, 2);
-  h.advance(3000); await flush();
-  assert.equal(h.video.playCalls, 3);
-  h.advance(54000); await flush();
-  assert.equal(h.controller.pending, null);
-  h.advance(600000); await flush();
-  assert.equal(h.video.playCalls, 3);
-  assert.equal(h.controller.resumePending, null);
+  for (let expected = 1; expected <= 16; expected++) {
+    h.advance(4999); await flush();
+    assert.equal(h.video.playCalls, expected - 1);
+    h.advance(1); await flush();
+    assert.equal(h.video.playCalls, expected);
+  }
   assert.equal(h.nextClicks, 0);
 });
 
-test('a seek during resume startup preserves the bounded supervision of the same video', async () => {
+test('a seek during a still-paused retry episode preserves the next five-second attempt', async () => {
   const h = harness();
   h.enable();
   h.pause();
-  h.advance(5000);
-  await flush();
-  const deadline = h.controller.pending.deadline;
+  h.advance(5000); await flush();
+  assert.equal(h.video.playCalls, 1);
+  h.advance(2000);
   h.video.seeking = true;
   h.controller.onSeeking(h.video);
-  h.advance(3000);
+  h.advance(2999);
   assert.equal(h.video.playCalls, 1);
-  assert.equal(h.controller.pending?.resume, true);
-  h.video.seeking = false;
   h.advance(1); await flush();
   assert.equal(h.video.playCalls, 2);
-  assert.equal(h.controller.pending.deadline, deadline);
-  h.advance(3000); await flush();
-  assert.equal(h.video.playCalls, 3);
-  h.advance(60000); await flush();
-  assert.equal(h.controller.pending, null);
-  h.advance(60000); await flush();
+  h.video.seeking = false;
+  h.advance(5000); await flush();
   assert.equal(h.video.playCalls, 3);
   assert.equal(h.nextClicks, 0);
 });
 
 for (const state of ['ended', 'near-end']) {
-  test(`${state} during resume startup recovers auto-next without replaying the completed video`, async () => {
+  test(`${state} during a still-paused retry episode advances at the existing five-second deadline`, async () => {
     const h = harness();
     h.enable();
     h.pause();
@@ -362,22 +348,16 @@ for (const state of ['ended', 'near-end']) {
     assert.equal(h.video.playCalls, 1);
     h.video.currentTime = h.video.duration - (state === 'near-end' ? 0.5 : 0);
     h.video.ended = state === 'ended';
-    h.advance(3000);
-    assert.equal(h.controller.pending, null);
-    h.advance(1000);
-    assert.equal(h.controller.pending?.completion, 'recovery');
-    assert.equal(h.controller.pending?.phase, 'countdown');
     h.advance(4999);
     assert.equal(h.nextClicks, 0);
     h.advance(1);
     await flush();
-    assert.equal(h.video.playCalls, 1);
-    assert.equal(h.controller.resumePending, null);
+    assert.equal(h.video.playCalls, 1, 'completed media must not be restarted');
     assert.equal(h.nextClicks, 1);
   });
 }
 
-test('turning timed resume off preserves an existing natural-end next-video countdown', () => {
+test('turning timed resume off cancels a pause-controlled natural-end countdown', () => {
   const h = harness();
   h.enable();
   h.video.currentTime = h.video.duration;
@@ -386,10 +366,9 @@ test('turning timed resume off preserves an existing natural-end next-video coun
   h.controller.onEnded(h.video);
   h.advance(2000);
   h.controller.configure({ resumeDelay: 0 });
-  assert.equal(h.controller.pending?.phase, 'countdown');
-  h.advance(3000);
+  h.advance(60000);
   assert.equal(h.video.playCalls, 0);
-  assert.equal(h.nextClicks, 1);
+  assert.equal(h.nextClicks, 0);
 });
 
 test('natural video completion keeps normal auto-next and never restarts the completed video', () => {
@@ -412,7 +391,6 @@ test('a real ended event during resume startup hands back to normal next-video b
   h.pause();
   h.advance(5000);
   assert.equal(h.video.playCalls, 1);
-  assert.equal(h.controller.pending?.resume, true);
   h.video.currentTime = h.video.duration;
   h.video.ended = true;
   h.controller.onEnded(h.video);

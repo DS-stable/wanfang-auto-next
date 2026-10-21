@@ -293,12 +293,12 @@ function installContent(h, { settings = {}, deferGet = false, storageThrows = fa
   window.eval(fs.readFileSync(require.resolve('../content.js'), 'utf8'));
   const host = h.document.getElementById('wanfang-auto-next-extension');
   const $ = id => host.shadowRoot.getElementById(id);
-  async function advance(ms = 500) {
+  async function advance(ms = 500, { poll = true } = {}) {
     time += ms;
     for (const timer of timeouts.splice(0)) {
       if (timer.due <= time) timer.callback(); else timeouts.push(timer);
     }
-    for (const callback of intervals) callback();
+    if (poll) for (const callback of intervals) callback();
     await flush();
   }
   function nativeEnd() {
@@ -400,4 +400,12 @@ test('timed resume UI cancellation and storage changes stop pending play', async
   ui.changed({ wanfangResumeDelay: { newValue: 0 } });
   await ui.advance(6000); assert.equal(h.state().playCalls, 0);
   assert.equal(ui.$('resume-cancel').hidden, true);
+});
+
+test('pause deadline wakes directly at five seconds without the polling interval', async t => {
+  const h = makeHarness(); t.after(() => h.window.close());
+  Object.assign(h.state(), { paused: true, currentTime: 10 });
+  const ui = installContent(h, { settings: { wanfangResumeDelay: 5 } });
+  await ui.advance(4999, { poll: false }); assert.equal(h.state().playCalls, 0);
+  await ui.advance(1, { poll: false }); assert.equal(h.state().playCalls, 1);
 });

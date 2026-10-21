@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "万方课程自动连播",
-  "version": "1.3.1",
+  "version": "1.4.0",
   "description": "万方课程视频自动连播，支持手动下一视频、暂停5秒后续播和测验提交后继续。",
   "permissions": [
     "storage"
