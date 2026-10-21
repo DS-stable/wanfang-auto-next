@@ -43,7 +43,7 @@
       @media(prefers-reduced-motion:no-preference) { button { transition:background .12s; } }
     </style>
     <section class="panel" aria-label="万方课程自动连播">
-      <header><span class="dot" aria-hidden="true"></span><h2>万方 · 自动连播<span class="version">1.3.0</span></h2>
+      <header><span class="dot" aria-hidden="true"></span><h2>万方 · 自动连播<span class="version">1.3.1</span></h2>
         <button id="collapse" type="button" aria-label="收起自动连播面板">收起</button></header>
       <div id="lesson"></div>
       <p id="status" role="status" aria-live="polite"></p>

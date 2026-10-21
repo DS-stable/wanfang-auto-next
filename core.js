@@ -120,7 +120,7 @@
     if (!video || video.seeking || video.error || !Number.isFinite(video.duration) ||
         video.duration <= 0 || !Number.isFinite(video.currentTime) ||
         video.currentTime < video.duration - 0.75) return false;
-    return video.ended || (evidence === "sdk" && video.paused);
+    return video.ended || (["sdk", "recovery"].includes(evidence) && video.paused);
   }
 
   function formatTime(seconds) {
@@ -139,8 +139,8 @@
       this.delay = 5;
       this.resumeDelay = 0;
       this.resumePending = null;
-      this.resumeObserved = null;
       this.resumeBlocked = null;
+      this.recoveryCandidate = null;
       this.pending = null;
       this.handled = new WeakMap();
       this.notice = null;
@@ -165,7 +165,9 @@
         this.resumeDelay = Number(resumeDelay);
         this.resumePending = null;
         this.resumeBlocked = null;
+        this.recoveryCandidate = null;
         if (!this.resumeDelay && this.pending?.resume) this.stop();
+        if (!this.resumeDelay && this.pending?.completion === "recovery") this.stop();
         if (this.resumeDelay) this.scheduleResume(this.read());
       }
       this.tick();
@@ -198,6 +200,8 @@
         resumeMessage: this.resumePending ?
           `视频已暂停，${Math.max(0, Math.ceil((this.resumePending.deadline - this.now()) / 1000))} 秒后继续播放。` :
           this.resumeDelay ? (sameLesson(snapshot, this.resumeBlocked || {}) ? this.resumeBlocked.message :
+            this.recoveryCandidate ? "检测到片尾，正在确认播放位置…" :
+            snapshot.video?.seeking ? "正在恢复播放位置，稳定后会重新计时续播。" :
             "已开启：每次暂停后等 5 秒续播。") : "∞：保持原状，不自动恢复播放。",
         ...options,
       });
@@ -221,7 +225,7 @@
       if (video !== snapshot.video || video.ended) return;
       this.resumePending = null;
       this.resumeBlocked = null;
-      this.resumeObserved = { ...snapshot, paused: false };
+      this.recoveryCandidate = null;
       // A real replay may finish again; duplicate ended events may not advance twice.
       this.handled.delete(video);
       if (this.pending?.phase === "starting" && sameLesson(snapshot, this.pending.playSnapshot)) {
@@ -235,7 +239,8 @@
     }
 
     onSeeking(video) {
-      if (this.resumePending?.origin.video === video) this.cancelResume("播放位置发生变化，已取消本次续播。");
+      if (this.resumePending?.origin.video === video) this.resumePending = null;
+      this.recoveryCandidate = null;
       if (this.pending?.phase === "countdown" && this.pending.origin.video === video) {
         this.cancel("播放位置发生变化，已取消切换。");
       }
@@ -243,7 +248,10 @@
 
     onEnded(video, evidence = "native") {
       const snapshot = this.read();
-      if (snapshot.video === video) this.resumePending = null;
+      if (snapshot.video === video) {
+        this.resumePending = null;
+        this.recoveryCandidate = null;
+      }
       if (snapshot.video === video && this.pending?.resume && finished(video, evidence)) this.stop();
       if (!snapshot.supported || !this.enabled || snapshot.video !== video ||
           !finished(video, evidence) || !snapshot.key ||
@@ -317,6 +325,7 @@
           (this.pending && this.pending.phase !== "countdown")) return;
       if (snapshot.hidden || snapshot.modal) return this.inform(snapshot, "请回到课程页并处理提示后继续。");
       this.resumePending = null;
+      this.recoveryCandidate = null;
       this.stop();
       this.beginSwitch(snapshot, {
         kind: "manual", origin: snapshot, target: snapshot.directoryNext.node,
@@ -327,14 +336,38 @@
     canScheduleResume(snapshot) {
       const video = snapshot.video;
       return snapshot.supported && !!video && !!snapshot.key && !!snapshot.source &&
-        !snapshot.nonVideo && !snapshot.hidden && !snapshot.modal && video.paused &&
+        !snapshot.nonVideo && !snapshot.modal && video.paused &&
         !video.ended && !video.seeking && !video.error && Number.isFinite(video.currentTime) &&
+        video.readyState >= 1 && Number.isFinite(video.duration) && video.duration > 0 &&
         !(Number.isFinite(video.duration) && video.currentTime >= video.duration - 0.75);
     }
 
     scheduleResume(snapshot) {
       if (!this.resumeDelay || this.pending || this.resumePending ||
-          !this.canScheduleResume(snapshot) || sameLesson(snapshot, this.resumeBlocked || {})) return;
+          sameLesson(snapshot, this.resumeBlocked || {})) return;
+      const video = snapshot.video;
+      // A refreshed player may restore to its saved end position without emitting
+      // native/SDK ended. Require stable metadata and position before advancing.
+      if (snapshot.supported && snapshot.key && snapshot.source && !snapshot.nonVideo &&
+          !snapshot.hidden && !snapshot.modal && video?.paused && !video.seeking && !video.error &&
+          video.readyState >= 1 && Number.isFinite(video.duration) && video.duration > 0 &&
+          finished(video, "recovery") && this.enabled) {
+        const mark = `${snapshot.route}\n${snapshot.key}\n${snapshot.source}`;
+        if (this.handled.get(video) === mark) {
+          this.recoveryCandidate = null;
+          return;
+        }
+        const candidate = this.recoveryCandidate;
+        if (!candidate || !sameLesson(snapshot, candidate.origin) ||
+            Math.abs(video.currentTime - candidate.position) > 0.01) {
+          this.recoveryCandidate = { origin: snapshot, position: video.currentTime, since: this.now() };
+          return;
+        }
+        if (this.now() - candidate.since >= 1000) this.onEnded(video, "recovery");
+        return;
+      }
+      this.recoveryCandidate = null;
+      if (!this.canScheduleResume(snapshot)) return;
       this.resumePending = { origin: snapshot, deadline: this.now() + this.resumeDelay * 1000 };
     }
 
@@ -348,39 +381,39 @@
     cancelResume(message = "已取消本次续播；下次暂停时仍会计时。") {
       const snapshot = this.read();
       this.resumePending = null;
+      this.recoveryCandidate = null;
       this.resumeBlocked = { ...snapshot, message };
       this.tick();
     }
 
     tickResume(snapshot) {
-      const previous = this.resumeObserved;
-      this.resumeObserved = { ...snapshot, paused: snapshot.video?.paused };
       if (!snapshot.supported) {
         this.resumePending = null;
-        this.resumeObserved = null;
         this.resumeBlocked = null;
+        this.recoveryCandidate = null;
         return false;
       }
       const video = snapshot.video;
-      if (this.pending?.resume && video && (video.ended || video.seeking ||
+      if (this.pending?.resume && video && (video.ended ||
           (Number.isFinite(video.duration) && video.currentTime >= video.duration - 0.75))) {
-        this.inform(snapshot, "视频状态发生变化，已停止本次定时续播。");
-        this.resumeBlocked = { ...snapshot, message: "本次定时续播已停止，请手动播放。" };
+        this.stop();
+        this.resumeBlocked = null;
       }
       if (video && !video.paused && !video.seeking && !video.ended && !video.error) this.resumeBlocked = null;
-      if (previous && sameLesson(snapshot, previous) && previous.paused === false && snapshot.video?.paused) {
-        this.scheduleResume(snapshot);
-      }
-      const timer = this.resumePending;
-      if (!timer) return false;
-      if (!this.resumeDelay || this.pending || !sameLesson(snapshot, timer.origin) ||
-          !this.canScheduleResume(snapshot)) {
+      const previousTimer = this.resumePending;
+      if (previousTimer && (!this.resumeDelay || this.pending || !sameLesson(snapshot, previousTimer.origin) ||
+          !this.canScheduleResume(snapshot))) {
         this.resumePending = null;
-        if (sameLesson(snapshot, timer.origin) && snapshot.video?.paused) {
+        if (sameLesson(snapshot, previousTimer.origin) && snapshot.video?.paused &&
+            (snapshot.modal || snapshot.video.error)) {
           this.resumeBlocked = { ...snapshot, message: "本次续播已取消；请回到课程页，处理提示后手动播放。" };
         }
-        return false;
       }
+      // Poll all paused players, including ones loaded after preference restore
+      // or paused by an SDK seek/application switch without a fresh pause event.
+      this.scheduleResume(snapshot);
+      const timer = this.resumePending;
+      if (!timer) return false;
       if (this.now() < timer.deadline) return false;
       this.resumePending = null;
       // One attempt per pause episode. A rejected play must not re-arm forever.
@@ -411,7 +444,7 @@
           this.stop();
           return this.tick();
         }
-        if (snapshot.hidden) return this.cancel("已取消自动切换，请保持课程页在前台。");
+        if (snapshot.hidden && !pending.resume) return this.cancel("已取消自动切换，请保持课程页在前台。");
         if (snapshot.modal) return this.cancel("请先处理页面上的提示，再手动继续。");
         if (pending.phase === "countdown") {
           if (!sameLesson(snapshot, pending.origin)) {
@@ -518,7 +551,9 @@
         return this.show(snapshot, snapshot.nonVideo ? "当前是测验或文档，完成后请手动选择视频。" :
           "等待播放器，请确认已登录并进入视频课件。");
       }
-      if (snapshot.hidden) return this.show(snapshot, "请保持课程页在前台，网站会暂停后台视频。");
+      if (snapshot.hidden) return this.show(snapshot, this.resumeDelay ?
+        (snapshot.video.paused ? "后台视频已暂停，定时续播会尝试恢复当前视频。" : "当前视频正在后台播放。") :
+        "请保持课程页在前台，网站会暂停后台视频。");
       const pausedMessage = snapshot.video.currentTime > 0.5 ?
         `当前节已暂停（${formatTime(snapshot.video.currentTime)} / ${formatTime(snapshot.video.duration)}），继续播放后才会自动切换。` :
         "请先手动播放当前节，结束后会自动切换。";
@@ -526,7 +561,7 @@
     }
 
     attemptPlay(snapshot, pending = null) {
-      if (!snapshot.video || snapshot.hidden || snapshot.modal) return;
+      if (!snapshot.video || (snapshot.hidden && !pending?.resume) || snapshot.modal) return;
       this.resumePending = null;
       const token = ++this.playToken;
       if (!pending) pending = { kind: "manual", origin: snapshot };

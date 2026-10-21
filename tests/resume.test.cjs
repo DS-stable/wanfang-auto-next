@@ -104,15 +104,20 @@ test('explicitly enabling five-second mode starts a countdown for the currently 
   assert.equal(h.video.playCalls, 1);
 });
 
-test('a newly selected paused video does not start merely because five-second mode is enabled', () => {
+test('a newly selected paused video receives a fresh five-second countdown', () => {
   const h = harness();
   h.enable();
   let calls = 0;
   const newVideo = { ...h.video, paused: true, currentTime: 0, play() { calls++; } };
   h.snapshot = { ...h.snapshot, key: '2.1 第二章', source: 'new.mp4', video: newVideo };
-  h.advance(60000);
-  assert.equal(h.controller.resumePending, null);
+  h.advance(500);
+  assert.equal(h.controller.resumePending?.deadline, h.time + 5000);
+  h.advance(4999);
   assert.equal(calls, 0);
+  h.advance(1);
+  assert.equal(calls, 1);
+  assert.equal(h.video.playCalls, 0);
+  assert.equal(h.nextClicks, 0);
 });
 
 test('resume remains independent of the automatic next-video switch', () => {
@@ -178,7 +183,7 @@ test('playback resumed by the user cancels the pending timer', () => {
 });
 
 for (const change of ['route', 'key', 'source', 'video']) {
-  test(`changing ${change} cancels the old countdown without playing the replacement`, () => {
+  test(`changing ${change} cancels the old countdown and gives the paused replacement five seconds`, () => {
     const h = harness();
     h.enable();
     h.pause();
@@ -189,55 +194,86 @@ for (const change of ['route', 'key', 'source', 'video']) {
       h.snapshot = { ...h.snapshot, [change]: `different-${change}` };
     }
     h.advance(5000);
-    assert.equal(h.controller.resumePending, null);
+    assert.equal(h.controller.resumePending?.deadline, h.time + 5000);
     assert.equal(h.video.playCalls, 0);
     assert.equal(replacementCalls, 0);
-    h.advance(60000);
+    h.advance(4999);
     assert.equal(h.video.playCalls, 0);
     assert.equal(replacementCalls, 0);
+    h.advance(1);
+    assert.equal(h.video.playCalls, change === 'video' ? 0 : 1);
+    assert.equal(replacementCalls, change === 'video' ? 1 : 0);
+    assert.equal(h.nextClicks, 0);
   });
 }
 
-for (const state of ['hidden', 'modal', 'seeking', 'error', 'ended', 'near-end']) {
+for (const state of ['modal', 'error']) {
   test(`${state} cancels a pause countdown and clearing it does not silently rearm`, () => {
     const h = harness();
     h.enable();
     h.pause();
     h.advance(2000);
-    if (state === 'hidden' || state === 'modal') h.snapshot = { ...h.snapshot, [state]: true };
-    else if (state === 'near-end') h.video.currentTime = h.video.duration - 0.5;
-    else h.video[state] = state === 'error' ? { code: 2 } : true;
+    if (state === 'modal') h.snapshot = { ...h.snapshot, modal: true };
+    else h.video.error = { code: 2 };
     h.advance(1000);
     assert.equal(h.controller.resumePending, null);
-    if (state === 'hidden' || state === 'modal') h.snapshot = { ...h.snapshot, [state]: false };
-    else if (state === 'near-end') h.video.currentTime = 20;
-    else h.video[state] = state === 'error' ? null : false;
+    if (state === 'modal') h.snapshot = { ...h.snapshot, modal: false };
+    else h.video.error = null;
     h.advance(60000);
     assert.equal(h.video.playCalls, 0);
     assert.equal(h.nextClicks, 0);
   });
 }
 
-test('a seeking event cancels the timer even when seeking has already settled before polling', () => {
+test('seeking clears the old timer and a paused player gets five seconds after the seek settles', () => {
   const h = harness();
   h.enable();
   h.pause();
+  h.advance(2000);
+  h.video.seeking = true;
   h.controller.onSeeking(h.video);
-  h.advance(5000);
+  h.advance(3000);
   assert.equal(h.controller.resumePending, null);
   assert.equal(h.video.playCalls, 0);
+  h.video.seeking = false;
+  h.advance(1);
+  assert.equal(h.controller.resumePending?.deadline, h.time + 5000);
+  h.advance(4999);
+  assert.equal(h.video.playCalls, 0);
+  h.advance(1);
+  assert.equal(h.video.playCalls, 1);
 });
 
-test('a pause that begins in the background does not start a timer on returning to the foreground', () => {
+test('a pause that begins in the background resumes the same video after five seconds', () => {
   const h = harness();
   h.enable();
   h.snapshot = { ...h.snapshot, hidden: true };
   h.pause();
-  h.advance(6000);
-  h.snapshot = { ...h.snapshot, hidden: false };
-  h.advance(60000);
-  assert.equal(h.controller.resumePending, null);
+  assert.equal(h.controller.resumePending?.deadline, h.time + 5000);
+  h.advance(4999);
   assert.equal(h.video.playCalls, 0);
+  h.advance(1);
+  assert.equal(h.video.playCalls, 1);
+  assert.equal(h.controller.pending?.resume, true);
+  h.snapshot = { ...h.snapshot, hidden: false };
+  h.playing();
+  h.advance(1000);
+  assert.equal(h.controller.resumePending, null);
+  assert.equal(h.video.playCalls, 1);
+  assert.equal(h.nextClicks, 0);
+});
+
+test('switching applications during a pause preserves its original five-second deadline', () => {
+  const h = harness();
+  h.enable();
+  h.pause();
+  h.advance(2000);
+  h.snapshot = { ...h.snapshot, hidden: true };
+  h.advance(2999);
+  assert.equal(h.video.playCalls, 0);
+  h.advance(1);
+  assert.equal(h.video.playCalls, 1);
+  assert.equal(h.nextClicks, 0);
 });
 
 test('NotAllowedError is reported once and does not generate an endless five-second play loop', async () => {
@@ -291,24 +327,53 @@ test('resume startup supervision retries the same media at most three times and 
   assert.equal(h.nextClicks, 0);
 });
 
-for (const state of ['seeking', 'ended', 'near-end']) {
-  test(`${state} during resume startup stops any further automatic play attempts`, async () => {
+test('a seek during resume startup preserves the bounded supervision of the same video', async () => {
+  const h = harness();
+  h.enable();
+  h.pause();
+  h.advance(5000);
+  await flush();
+  const deadline = h.controller.pending.deadline;
+  h.video.seeking = true;
+  h.controller.onSeeking(h.video);
+  h.advance(3000);
+  assert.equal(h.video.playCalls, 1);
+  assert.equal(h.controller.pending?.resume, true);
+  h.video.seeking = false;
+  h.advance(1); await flush();
+  assert.equal(h.video.playCalls, 2);
+  assert.equal(h.controller.pending.deadline, deadline);
+  h.advance(3000); await flush();
+  assert.equal(h.video.playCalls, 3);
+  h.advance(60000); await flush();
+  assert.equal(h.controller.pending, null);
+  h.advance(60000); await flush();
+  assert.equal(h.video.playCalls, 3);
+  assert.equal(h.nextClicks, 0);
+});
+
+for (const state of ['ended', 'near-end']) {
+  test(`${state} during resume startup recovers auto-next without replaying the completed video`, async () => {
     const h = harness();
     h.enable();
     h.pause();
     h.advance(5000);
     await flush();
     assert.equal(h.video.playCalls, 1);
-    if (state === 'near-end') h.video.currentTime = h.video.duration - 0.5;
-    else h.video[state] = true;
+    h.video.currentTime = h.video.duration - (state === 'near-end' ? 0.5 : 0);
+    h.video.ended = state === 'ended';
     h.advance(3000);
     assert.equal(h.controller.pending, null);
-    if (state === 'near-end') h.video.currentTime = 20;
-    else h.video[state] = false;
-    h.advance(60000);
+    h.advance(1000);
+    assert.equal(h.controller.pending?.completion, 'recovery');
+    assert.equal(h.controller.pending?.phase, 'countdown');
+    h.advance(4999);
+    assert.equal(h.nextClicks, 0);
+    h.advance(1);
     await flush();
     assert.equal(h.video.playCalls, 1);
     assert.equal(h.controller.resumePending, null);
+    assert.equal(h.nextClicks, 1);
   });
 }
 
